@@ -11,13 +11,13 @@ defaults:
     shell: bash
 
 jobs:
-  
   make-docker-images:
     strategy:
       matrix:
         postgres: [9.5, 9.6, 10, 11, 12, 13]
         postgis: ['2.5', '3.0']
         variant: [default, alpine]
+        platform: [arm64, amd64]
         exclude:
           - postgres: 13
             postgis: '2.5'
@@ -28,32 +28,48 @@ jobs:
           - postgres: 13
             postgis: master
             variant: default
-    name: Build docker image for ${{ matrix.postgres }}-${{ matrix.postgis }} variant ${{ matrix.variant }}
+    name: Build ${{ matrix.platform }} docker image for ${{ matrix.postgres }}-${{ matrix.postgis }} variant ${{ matrix.variant }}
     runs-on: ubuntu-20.04
-    continue-on-error: ${{ matrix.postgis == 'master' }}
+    continue-on-error: true
     env:
       VERSION: ${{ matrix.postgres }}-${{ matrix.postgis }}
       VARIANT: ${{ matrix.variant }}
+      PUSH_IMAGES: ${{ (github.ref == 'refs/heads/master') && (github.event_name != 'pull_request') }}
 
     steps:
     - name: Checkout source
       uses: actions/checkout@v2
 
-    - name: Build docker image for ${{ env.VERSION }} ${{ env.VARIANT }}
-      run: make test
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v1
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v1
 
     - name: Login to dockerhub
       uses: docker/login-action@v1
-      if: ${{  (github.ref == 'refs/heads/master') && (github.event_name != 'pull_request')  }}
+      if: ${{ env.PUSH_IMAGES }}
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
-    - name: Push docker image to dockerhub
-      if: ${{  (github.ref == 'refs/heads/master') && (github.event_name != 'pull_request')  }}
-      env:
-        DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
-        DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
-      run: make push
+    - name: Set variant parameters
+      id: variant-params
+      run: |
+        if [[ $VARIANT == default ]] ; then
+            echo "::set-output name=context::./$VERSION"
+            echo "::set-output name=version::$VERSION"
+        else
+            echo "::set-output name=context::./$VERSION/$VARIANT"
+            echo "::set-output name=version::$VERSION-$VARIANT"
+        fi
+
+    - name: Build and push images
+      uses: docker/build-push-action@v2
+      with:
+        context: ${{ steps.variant-params.outputs.context }}
+        file: ${{ steps.variant-params.outputs.context }}/Dockerfile
+        platforms: ${{ matrix.platform }}
+        push: ${{ env.PUSH_IMAGES }}
+        tags: derdaele/postgis:${{ steps.variant-params.outputs.version }}
 
